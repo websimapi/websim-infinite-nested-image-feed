@@ -160,13 +160,20 @@
         }
 
         async function startImageProcessor() {
+            // Get current user once at startup
+            const currentUser = await window.websim.getCurrentUser();
+            if (!currentUser) {
+                updateStatus('Not logged in - cannot process comments');
+                return;
+            }
+            
             // Process unprocessed comments every 2 seconds
             setInterval(async () => {
                 if (isProcessing) return;
                 
                 try {
                     const unprocessedComments = room.collection('comment')
-                        .filter({ processed: false })
+                        .filter({ processed: false, username: currentUser.username })
                         .getList();
                     
                     if (unprocessedComments.length > 0) {
@@ -223,6 +230,7 @@
             try {
                 updateStatus('Fetching comments from page metadata...');
                 const currentProject = await window.websim.getCurrentProject();
+                const currentUser = await window.websim.getCurrentUser();
                 
                 const response = await fetch(`/api/v1/projects/${currentProject.id}/comments?sort_order=desc&first=50`);
                 const data = await response.json();
@@ -245,7 +253,8 @@
                 }
                 
                 displayComments(pageComments);
-                updateStatus(`Loaded ${pageComments.length} comments from page metadata`);
+                const userComments = pageComments.filter(c => c.username === currentUser?.username).length;
+                updateStatus(`Loaded ${pageComments.length} comments (${userComments} yours to process)`);
                 
             } catch (error) {
                 console.error('Error loading comments from metadata:', error);
