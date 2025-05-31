@@ -139,37 +139,39 @@
         const room = new WebsimSocket({
             schema: {
                 comment: {
-                    id: "text",
+                    id: "text", 
                     message: "text",
                     username: "text",
-                    created_at: "text",
+                    created_at: "text", 
                     processed: "boolean"
                 },
                 generated_image: {
-                    id: "uuid",
-                    comment_id: "text",
+                    id: "uuid", 
+                    comment_id: "text", 
                     comment_message: "text",
                     image_url: "text",
                     prompt_used: "text",
-                    username: "text"
+                    username: "text" 
                 }
             }
         });
         let canvas, ctx;
         let currentImages = [];
-        let zoomLevel = 0;
         let isProcessing = false;
         let animationId;
+        let currentLoggedInUser = null; 
 
         // Initialize
         document.addEventListener('DOMContentLoaded', async () => {
             canvas = document.getElementById('renderCanvas');
             ctx = canvas.getContext('2d');
             
+            currentLoggedInUser = await window.websim.getCurrentUser(); 
+
             setupCanvas();
-            startImageProcessor();
+            startImageProcessor(); 
             startRenderer();
-            loadComments();
+            loadComments(); 
         });
 
         function setupCanvas() {
@@ -188,24 +190,21 @@
         }
 
         async function startImageProcessor() {
-            // Get current user once at startup
-            const currentUser = await window.websim.getCurrentUser();
-            if (!currentUser) {
-                updateStatus('Not logged in - cannot process comments');
+            if (!currentLoggedInUser || !currentLoggedInUser.username) {
                 return;
             }
             
-            // Process unprocessed comments every 2 seconds
             setInterval(async () => {
                 if (isProcessing) return;
-                
+
                 try {
-                    const unprocessedComments = await room.collection('comment')
-                        .filter({ processed: false, username: currentUser.username })
-                        .getList();
+                    const unprocessedComments = await room.query(
+                        'SELECT id, message, username, created_at, processed FROM public.comment WHERE processed = $1 AND username = $2 ORDER BY created_at ASC LIMIT 1',
+                        [false, currentLoggedInUser.username]
+                    );
                     
                     if (unprocessedComments.length > 0) {
-                        const comment = unprocessedComments[0]; // Process oldest first
+                        const comment = unprocessedComments[0];
                         await processComment(comment);
                     }
                 } catch (error) {
@@ -217,12 +216,16 @@
         async function processComment(comment) {
             if (isProcessing) return;
             
+            if (!currentLoggedInUser || !currentLoggedInUser.username || comment.username !== currentLoggedInUser.username) {
+                updateStatus(`Skipping processing for comment by ${comment.username} as it's not for the current user.`);
+                return;
+            }
+            
             isProcessing = true;
-            updateStatus(`Processing: "${comment.message}"`);
+            updateStatus(`Processing: "${comment.message}" by ${comment.username}`);
             document.getElementById('loading').style.display = 'block';
 
             try {
-                // Generate image with white square prompt
                 const prompt = `White Square in the center ${comment.message} White Square in the center`;
                 
                 const result = await websim.imageGen({
@@ -230,7 +233,6 @@
                     aspect_ratio: "1:1"
                 });
 
-                // Store generated image
                 await room.collection('generated_image').upsert({
                     comment_id: comment.id,
                     comment_message: comment.message,
@@ -239,7 +241,6 @@
                     username: comment.username
                 });
 
-                // Mark comment as processed
                 await room.collection('comment').upsert({
                     id: comment.id,
                     message: comment.message,
@@ -263,45 +264,55 @@
             try {
                 updateStatus('Fetching comments from page metadata...');
                 const currentProject = await window.websim.getCurrentProject();
-                const currentUser = await window.websim.getCurrentUser();
+
+                if (!currentProject || !currentProject.id) {
+                    updateStatus('Could not get current project ID.');
+                    return;
+                }
                 
                 const response = await fetch(`/api/v1/projects/${currentProject.id}/comments?sort_order=desc&first=50`);
+                if (!response.ok) {
+                    throw new Error(`API request failed with status ${response.status}`);
+                }
                 const data = await response.json();
                 
+                if (!data.comments || !data.comments.data) {
+                    throw new Error('Invalid comment data structure from API');
+                }
+
                 const pageComments = data.comments.data.map(item => ({
                     id: item.comment.id,
                     message: item.comment.raw_content || 'No content',
                     username: item.comment.author?.username || 'Anonymous',
                     created_at: item.comment.created_at,
-                    processed: false
+                    processed: false 
                 }));
                 
-                // Store comments in local database for processing
                 for (const comment of pageComments) {
-                    try {
+                    const existingComment = await room.collection('comment').filter({ id: comment.id }).getList();
+                    if (existingComment.length > 0 && existingComment[0].processed) {
+                    } else {
                         await room.collection('comment').upsert(comment);
-                    } catch (error) {
-                        // Comment might already exist, continue
-                        console.log('Comment already exists:', comment.id);
                     }
                 }
                 
-                // Get updated comments from database to show current processed status
-                const dbComments = await room.collection('comment').getList();
-                displayComments(dbComments);
-                
-                const userComments = pageComments.filter(c => c.username === currentUser?.username).length;
-                updateStatus(`Loaded ${pageComments.length} comments (${userComments} yours to process)`);
+                const dbComments = await room.query('SELECT id, message, username, created_at, processed FROM public.comment ORDER BY created_at DESC');
+                displayComments(dbComments); 
+
+                const numUserCommentsToProcess = pageComments.filter(c => 
+                    c.username === (currentLoggedInUser?.username) && !dbComments.find(dbc => dbc.id === c.id && dbc.processed)
+                ).length;
+
+                updateStatus(`Loaded ${pageComments.length} comments. You have ${numUserCommentsToProcess} of yours to process.`);
                 
             } catch (error) {
                 console.error('Error loading comments from metadata:', error);
-                updateStatus('Error loading comments from page metadata');
+                updateStatus(`Error loading comments: ${error.message}`);
             }
         }
 
-        function displayComments(comments) {
-            // Filter out processed comments from display
-            const pendingComments = comments.filter(c => !c.processed);
+        function displayComments(allComments) {
+            const pendingComments = allComments.filter(c => !c.processed);
             const container = document.getElementById('commentsList');
             
             if (pendingComments.length === 0) {
@@ -322,24 +333,32 @@
         }
 
         async function startRenderer() {
-            // Subscribe to generated images and refresh comments
             room.collection('generated_image').subscribe(async (images) => {
                 if (images.length > 0) {
-                    currentImages = images.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-                    await loadImages();
+                    currentImages = images.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+                    await loadImages(); 
+                } else {
+                    currentImages = []; 
+                    renderNestedImages([]); 
                 }
             });
             
-            // Subscribe to comment updates to refresh display
-            room.collection('comment').subscribe(async (comments) => {
-                displayComments(comments);
+            room.query('SELECT id, message, username, created_at, processed FROM public.comment ORDER BY created_at DESC')
+                .subscribe(async (comments) => {
+                    displayComments(comments);
             });
+
+            const initialImages = await room.collection('generated_image').getList();
+            if (initialImages.length > 0) {
+                 currentImages = initialImages.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+                 await loadImages();
+            }
         }
 
         async function loadImages() {
             const imageElements = [];
             
-            for (const imageData of currentImages.slice(0, 10)) { // Load max 10 for performance
+            for (const imageData of currentImages.slice(0, 10)) { 
                 try {
                     const img = new Image();
                     img.crossOrigin = 'anonymous';
@@ -370,11 +389,10 @@
             }
             
             let time = 0;
-            const zoomSpeed = 0.002;
-            const transitionDuration = 4000; // 4 seconds per zoom for better viewing
+            const transitionDuration = 4000; 
             
             function animate() {
-                time += 16; // ~60fps
+                time += 16; 
                 
                 ctx.clearRect(0, 0, canvas.width, canvas.height);
                 
@@ -387,17 +405,14 @@
                 const centerY = canvas.height / 2;
                 const baseSize = Math.min(canvas.width, canvas.height) * 0.8;
                 
-                // Calculate current zoom phase - infinite cycling
                 const totalCycleTime = transitionDuration * imageElements.length;
                 const cycleTime = time % totalCycleTime;
                 const currentIndex = Math.floor(cycleTime / transitionDuration) % imageElements.length;
                 const nextIndex = (currentIndex + 1) % imageElements.length;
                 const progress = (cycleTime % transitionDuration) / transitionDuration;
                 
-                // Smooth zoom transition
-                const zoomFactor = 1 + (progress * 2); // Zoom from 1x to 3x
+                const zoomFactor = 1 + (progress * 2); 
                 
-                // Render current image
                 const element = imageElements[currentIndex];
                 let size = baseSize * zoomFactor;
                 
@@ -411,10 +426,8 @@
                 );
                 ctx.restore();
                 
-                // Render next image in white square area if zoomed enough
                 if (progress > 0.3 && imageElements.length > 1) {
                     const nextElement = imageElements[nextIndex];
-                    // White square is assumed to be 40% of image size in center
                     const whiteSquareSize = size * 0.4;
                     const nextImageProgress = Math.min((progress - 0.3) / 0.7, 1);
                     const nextSize = whiteSquareSize * nextImageProgress;
@@ -431,7 +444,6 @@
                     ctx.restore();
                 }
                 
-                // Display current comment
                 ctx.save();
                 ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
                 ctx.fillRect(20, canvas.height - 100, canvas.width - 40, 80);
