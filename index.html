@@ -37,46 +37,6 @@
             backdrop-filter: blur(10px);
         }
 
-        .comment-input {
-            display: flex;
-            gap: 10px;
-            margin-bottom: 10px;
-        }
-
-        input[type="text"] {
-            flex: 1;
-            padding: 8px 12px;
-            border: none;
-            border-radius: 5px;
-            background: rgba(255, 255, 255, 0.1);
-            color: #fff;
-            font-size: 14px;
-        }
-
-        input[type="text"]::placeholder {
-            color: rgba(255, 255, 255, 0.5);
-        }
-
-        button {
-            padding: 8px 16px;
-            border: none;
-            border-radius: 5px;
-            background: #007bff;
-            color: #fff;
-            font-size: 14px;
-            cursor: pointer;
-            transition: background 0.2s;
-        }
-
-        button:hover {
-            background: #0056b3;
-        }
-
-        button:disabled {
-            background: #555;
-            cursor: not-allowed;
-        }
-
         .status {
             font-size: 12px;
             color: rgba(255, 255, 255, 0.7);
@@ -147,11 +107,7 @@
 <body>
     <div class="container">
         <div class="controls">
-            <div class="comment-input">
-                <input type="text" id="commentInput" placeholder="Enter a comment for image generation..." maxlength="200">
-                <button id="submitComment">Submit</button>
-            </div>
-            <div class="status" id="status">Ready to generate images from comments</div>
+            <div class="status" id="status">Loading comments from page metadata...</div>
         </div>
 
         <div class="comments-list">
@@ -183,7 +139,6 @@
             ctx = canvas.getContext('2d');
             
             setupCanvas();
-            setupEventListeners();
             startImageProcessor();
             startRenderer();
             loadComments();
@@ -198,36 +153,6 @@
             
             updateCanvas();
             window.addEventListener('resize', updateCanvas);
-        }
-
-        function setupEventListeners() {
-            const input = document.getElementById('commentInput');
-            const button = document.getElementById('submitComment');
-
-            button.addEventListener('click', submitComment);
-            input.addEventListener('keypress', (e) => {
-                if (e.key === 'Enter') submitComment();
-            });
-        }
-
-        async function submitComment() {
-            const input = document.getElementById('commentInput');
-            const comment = input.value.trim();
-            
-            if (!comment) return;
-
-            try {
-                await room.collection('comment').create({
-                    message: comment,
-                    processed: false
-                });
-                
-                input.value = '';
-                updateStatus('Comment submitted for processing...');
-            } catch (error) {
-                console.error('Error submitting comment:', error);
-                updateStatus('Error submitting comment');
-            }
         }
 
         function updateStatus(message) {
@@ -295,9 +220,37 @@
         }
 
         async function loadComments() {
-            room.collection('comment').subscribe((comments) => {
-                displayComments(comments.reverse()); // Show newest first
-            });
+            try {
+                updateStatus('Fetching comments from page metadata...');
+                const currentProject = await window.websim.getCurrentProject();
+                
+                const response = await fetch(`/api/v1/projects/${currentProject.id}/comments?sort_order=desc&first=50`);
+                const data = await response.json();
+                
+                const pageComments = data.comments.data.map(item => ({
+                    id: item.comment.id,
+                    message: item.comment.raw_content || 'No content',
+                    username: item.comment.author?.username || 'Anonymous',
+                    created_at: item.comment.created_at,
+                    processed: false
+                }));
+                
+                // Store comments in local database for processing
+                for (const comment of pageComments) {
+                    try {
+                        await room.collection('comment').create(comment);
+                    } catch (error) {
+                        // Comment might already exist, continue
+                    }
+                }
+                
+                displayComments(pageComments);
+                updateStatus(`Loaded ${pageComments.length} comments from page metadata`);
+                
+            } catch (error) {
+                console.error('Error loading comments from metadata:', error);
+                updateStatus('Error loading comments from page metadata');
+            }
         }
 
         function displayComments(comments) {
@@ -460,4 +413,3 @@
 <script defer src="https://static.cloudflareinsights.com/beacon.min.js/v8c78df7c7c0f484497ecbca7046644da1771523124516" integrity="sha512-8DS7rgIrAmghBFwoOTujcf6D9rXvH8xm8JQ1Ja01h9QX8EzXldiszufYa4IFfKdLUKTTrnSFXLDkUEOTrZQ8Qg==" data-cf-beacon='{"version":"2024.11.0","token":"4c6229722a6346bc8eb5cb0e5eae5d41","server_timing":{"name":{"cfCacheStatus":true,"cfEdge":true,"cfExtPri":true,"cfL4":true,"cfOrigin":true,"cfSpeedBrain":true},"location_startswith":null}}' crossorigin="anonymous"></script>
 </body>
 </html>
-
