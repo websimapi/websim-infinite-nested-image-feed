@@ -139,15 +139,15 @@
         const room = new WebsimSocket({
             schema: {
                 comment: {
-                    id: "text", 
+                    id: "uuid",
                     message: "text",
                     username: "text",
-                    created_at: "text", 
+                    created_at: "timestamptz",
                     processed: "boolean"
                 },
                 generated_image: {
                     id: "uuid", 
-                    comment_id: "text", 
+                    comment_id: "uuid", 
                     comment_message: "text",
                     image_url: "text",
                     prompt_used: "text",
@@ -199,7 +199,7 @@
 
                 try {
                     const unprocessedComments = await room.query(
-                        'SELECT id, message, username, created_at, processed FROM public.comment WHERE processed = $1 AND username = $2 ORDER BY created_at ASC LIMIT 1',
+                        'SELECT c.id, c.message, c.username, c.created_at, c.processed FROM public.comment c WHERE c.processed = $1 AND c.username = $2 ORDER BY c.created_at ASC LIMIT 1',
                         [false, currentLoggedInUser.username]
                     );
                     
@@ -296,7 +296,7 @@
                     }
                 }
                 
-                const dbComments = await room.query('SELECT id, message, username, created_at, processed FROM public.comment ORDER BY created_at DESC');
+                const dbComments = await room.query('SELECT c.id, c.message, c.username, c.created_at, c.processed FROM public.comment c ORDER BY c.created_at DESC');
                 displayComments(dbComments); 
 
                 const numUserCommentsToProcess = pageComments.filter(c => 
@@ -343,7 +343,7 @@
                 }
             });
             
-            room.query('SELECT id, message, username, created_at, processed FROM public.comment ORDER BY created_at DESC')
+            room.query('SELECT c.id, c.message, c.username, c.created_at, c.processed FROM public.comment c ORDER BY c.created_at DESC')
                 .subscribe(async (comments) => {
                     displayComments(comments);
             });
