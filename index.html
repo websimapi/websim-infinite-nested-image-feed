@@ -126,7 +126,25 @@
 
     <script>
         // Global variables
-        const room = new WebsimSocket();
+        const room = new WebsimSocket({
+            schema: {
+                comment: {
+                    id: "text",
+                    message: "text",
+                    username: "text",
+                    created_at: "text",
+                    processed: "boolean"
+                },
+                generated_image: {
+                    id: "uuid",
+                    comment_id: "text",
+                    comment_message: "text",
+                    image_url: "text",
+                    prompt_used: "text",
+                    username: "text"
+                }
+            }
+        });
         let canvas, ctx;
         let currentImages = [];
         let zoomLevel = 0;
@@ -172,7 +190,7 @@
                 if (isProcessing) return;
                 
                 try {
-                    const unprocessedComments = room.collection('comment')
+                    const unprocessedComments = await room.collection('comment')
                         .filter({ processed: false, username: currentUser.username })
                         .getList();
                     
@@ -203,15 +221,20 @@
                 });
 
                 // Store generated image
-                await room.collection('generated_image').create({
+                await room.collection('generated_image').upsert({
                     comment_id: comment.id,
                     comment_message: comment.message,
                     image_url: result.url,
-                    prompt_used: prompt
+                    prompt_used: prompt,
+                    username: comment.username
                 });
 
                 // Mark comment as processed
-                await room.collection('comment').update(comment.id, {
+                await room.collection('comment').upsert({
+                    id: comment.id,
+                    message: comment.message,
+                    username: comment.username,
+                    created_at: comment.created_at,
                     processed: true
                 });
 
@@ -246,13 +269,17 @@
                 // Store comments in local database for processing
                 for (const comment of pageComments) {
                     try {
-                        await room.collection('comment').create(comment);
+                        await room.collection('comment').upsert(comment);
                     } catch (error) {
                         // Comment might already exist, continue
+                        console.log('Comment already exists:', comment.id);
                     }
                 }
                 
-                displayComments(pageComments);
+                // Get updated comments from database to show current processed status
+                const dbComments = await room.collection('comment').getList();
+                displayComments(dbComments);
+                
                 const userComments = pageComments.filter(c => c.username === currentUser?.username).length;
                 updateStatus(`Loaded ${pageComments.length} comments (${userComments} yours to process)`);
                 
@@ -263,26 +290,39 @@
         }
 
         function displayComments(comments) {
+            // Filter out processed comments from display
+            const pendingComments = comments.filter(c => !c.processed);
             const container = document.getElementById('commentsList');
-            container.innerHTML = comments.map(comment => `
-                <div class="comment-item ${comment.processed ? 'comment-processed' : ''}">
+            
+            if (pendingComments.length === 0) {
+                container.innerHTML = '<div class="comment-item">All comments processed! </div>';
+                return;
+            }
+            
+            container.innerHTML = pendingComments.map(comment => `
+                <div class="comment-item">
                     <div style="font-weight: bold;">${comment.username}</div>
                     <div>${comment.message}</div>
                     <div style="opacity: 0.7; font-size: 10px;">
                         ${new Date(comment.created_at).toLocaleString()}
-                        ${comment.processed ? '✓ Processed' : '⏳ Pending'}
+                        
                     </div>
                 </div>
             `).join('');
         }
 
         async function startRenderer() {
-            // Subscribe to generated images
+            // Subscribe to generated images and refresh comments
             room.collection('generated_image').subscribe(async (images) => {
                 if (images.length > 0) {
-                    currentImages = images.reverse(); // Newest first
+                    currentImages = images.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
                     await loadImages();
                 }
+            });
+            
+            // Subscribe to comment updates to refresh display
+            room.collection('comment').subscribe(async (comments) => {
+                displayComments(comments);
             });
         }
 
@@ -321,7 +361,7 @@
             
             let time = 0;
             const zoomSpeed = 0.002;
-            const transitionDuration = 3000; // 3 seconds per zoom
+            const transitionDuration = 4000; // 4 seconds per zoom for better viewing
             
             function animate() {
                 time += 16; // ~60fps
@@ -337,81 +377,85 @@
                 const centerY = canvas.height / 2;
                 const baseSize = Math.min(canvas.width, canvas.height) * 0.8;
                 
-                // Calculate current zoom phase
-                const currentIndex = Math.floor(time / transitionDuration) % imageElements.length;
+                // Calculate current zoom phase - infinite cycling
+                const totalCycleTime = transitionDuration * imageElements.length;
+                const cycleTime = time % totalCycleTime;
+                const currentIndex = Math.floor(cycleTime / transitionDuration) % imageElements.length;
                 const nextIndex = (currentIndex + 1) % imageElements.length;
-                const progress = (time % transitionDuration) / transitionDuration;
+                const progress = (cycleTime % transitionDuration) / transitionDuration;
                 
                 // Smooth zoom transition
                 const zoomFactor = 1 + (progress * 2); // Zoom from 1x to 3x
                 
-                // Render current image stack
-                for (let i = 0; i <= currentIndex && i < imageElements.length; i++) {
-                    const element = imageElements[i];
-                    const isLatest = i === currentIndex;
-                    
-                    let size = baseSize;
-                    let alpha = 1;
-                    
-                    if (isLatest) {
-                        size *= zoomFactor;
-                        // Calculate nested position (white square in center)
-                        const whiteSquareSize = size * 0.3; // Assume white square is 30% of image
-                        
-                        // Render next image in white square area if available
-                        if (nextIndex < imageElements.length && progress > 0.5) {
-                            const nextElement = imageElements[nextIndex];
-                            const nextSize = whiteSquareSize * (progress - 0.5) * 2;
-                            
-                            ctx.save();
-                            ctx.globalAlpha = (progress - 0.5) * 2;
-                            ctx.drawImage(
-                                nextElement.img,
-                                centerX - nextSize/2,
-                                centerY - nextSize/2,
-                                nextSize,
-                                nextSize
-                            );
-                            ctx.restore();
-                        }
-                    }
+                // Render current image
+                const element = imageElements[currentIndex];
+                let size = baseSize * zoomFactor;
+                
+                ctx.save();
+                ctx.drawImage(
+                    element.img,
+                    centerX - size/2,
+                    centerY - size/2,
+                    size,
+                    size
+                );
+                ctx.restore();
+                
+                // Render next image in white square area if zoomed enough
+                if (progress > 0.3 && imageElements.length > 1) {
+                    const nextElement = imageElements[nextIndex];
+                    // White square is assumed to be 40% of image size in center
+                    const whiteSquareSize = size * 0.4;
+                    const nextImageProgress = Math.min((progress - 0.3) / 0.7, 1);
+                    const nextSize = whiteSquareSize * nextImageProgress;
                     
                     ctx.save();
-                    ctx.globalAlpha = alpha;
+                    ctx.globalAlpha = nextImageProgress;
                     ctx.drawImage(
-                        element.img,
-                        centerX - size/2,
-                        centerY - size/2,
-                        size,
-                        size
+                        nextElement.img,
+                        centerX - nextSize/2,
+                        centerY - nextSize/2,
+                        nextSize,
+                        nextSize
                     );
                     ctx.restore();
                 }
                 
                 // Display current comment
-                if (imageElements[currentIndex]) {
-                    ctx.save();
-                    ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
-                    ctx.fillRect(20, canvas.height - 80, canvas.width - 40, 60);
-                    
-                    ctx.fillStyle = '#fff';
-                    ctx.font = '16px Arial';
-                    ctx.textAlign = 'left';
-                    ctx.fillText(
-                        `"${imageElements[currentIndex].data.comment_message}"`,
-                        30,
-                        canvas.height - 50
-                    );
-                    
-                    ctx.font = '12px Arial';
-                    ctx.fillStyle = '#ccc';
-                    ctx.fillText(
-                        `by ${imageElements[currentIndex].data.username}`,
-                        30,
-                        canvas.height - 30
-                    );
-                    ctx.restore();
+                ctx.save();
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+                ctx.fillRect(20, canvas.height - 100, canvas.width - 40, 80);
+                
+                ctx.fillStyle = '#fff';
+                ctx.font = '18px Arial';
+                ctx.textAlign = 'left';
+                const maxWidth = canvas.width - 60;
+                const words = element.data.comment_message.split(' ');
+                let line = '';
+                let y = canvas.height - 70;
+                
+                for (let n = 0; n < words.length; n++) {
+                    const testLine = line + words[n] + ' ';
+                    const metrics = ctx.measureText(testLine);
+                    const testWidth = metrics.width;
+                    if (testWidth > maxWidth && n > 0) {
+                        ctx.fillText(line, 30, y);
+                        line = words[n] + ' ';
+                        y += 20;
+                    } else {
+                        line = testLine;
+                    }
                 }
+                ctx.fillText(line, 30, y);
+                
+                ctx.font = '12px Arial';
+                ctx.fillStyle = '#ccc';
+                ctx.fillText(
+                    `by ${element.data.username} • ${currentIndex + 1}/${imageElements.length}`,
+                    30,
+                    canvas.height - 20
+                );
+                ctx.restore();
                 
                 animationId = requestAnimationFrame(animate);
             }
