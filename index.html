@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Infinite Nested Image Feed</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: #000;
+            color: #fff;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            overflow: hidden;
+        }
+
+        .container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .controls {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            z-index: 100;
+            background: rgba(0, 0, 0, 0.8);
+            padding: 15px;
+            border-radius: 10px;
+            backdrop-filter: blur(10px);
+        }
+
+        .comment-input {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+
+        input[type="text"] {
+            flex: 1;
+            padding: 8px 12px;
+            border: none;
+            border-radius: 5px;
+            background: rgba(255, 255, 255, 0.1);
+            color: #fff;
+            font-size: 14px;
+        }
+
+        input[type="text"]::placeholder {
+            color: rgba(255, 255, 255, 0.5);
+        }
+
+        button {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 5px;
+            background: #007bff;
+            color: #fff;
+            font-size: 14px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        button:hover {
+            background: #0056b3;
+        }
+
+        button:disabled {
+            background: #555;
+            cursor: not-allowed;
+        }
+
+        .status {
+            font-size: 12px;
+            color: rgba(255, 255, 255, 0.7);
+        }
+
+        .canvas-container {
+            flex: 1;
+            position: relative;
+            overflow: hidden;
+        }
+
+        #renderCanvas {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            transition: transform 0.5s ease-in-out;
+        }
+
+        .loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+        }
+
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid rgba(255, 255, 255, 0.3);
+            border-top: 3px solid #fff;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 10px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .comments-list {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            width: 300px;
+            max-height: 400px;
+            overflow-y: auto;
+            background: rgba(0, 0, 0, 0.8);
+            border-radius: 10px;
+            padding: 15px;
+            backdrop-filter: blur(10px);
+        }
+
+        .comment-item {
+            padding: 8px;
+            margin-bottom: 8px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 5px;
+            font-size: 12px;
+        }
+
+        .comment-processed {
+            background: rgba(0, 255, 0, 0.2);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="controls">
+            <div class="comment-input">
+                <input type="text" id="commentInput" placeholder="Enter a comment for image generation..." maxlength="200">
+                <button id="submitComment">Submit</button>
+            </div>
+            <div class="status" id="status">Ready to generate images from comments</div>
+        </div>
+
+        <div class="comments-list">
+            <h3 style="margin-bottom: 10px;">Recent Comments</h3>
+            <div id="commentsList"></div>
+        </div>
+
+        <div class="canvas-container">
+            <canvas id="renderCanvas"></canvas>
+            <div class="loading" id="loading" style="display: none;">
+                <div class="spinner"></div>
+                <div>Generating image...</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Global variables
+        const room = new WebsimSocket();
+        let canvas, ctx;
+        let currentImages = [];
+        let zoomLevel = 0;
+        let isProcessing = false;
+        let animationId;
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', async () => {
+            canvas = document.getElementById('renderCanvas');
+            ctx = canvas.getContext('2d');
+            
+            setupCanvas();
+            setupEventListeners();
+            startImageProcessor();
+            startRenderer();
+            loadComments();
+        });
+
+        function setupCanvas() {
+            const updateCanvas = () => {
+                const rect = canvas.parentElement.getBoundingClientRect();
+                canvas.width = rect.width;
+                canvas.height = rect.height;
+            };
+            
+            updateCanvas();
+            window.addEventListener('resize', updateCanvas);
+        }
+
+        function setupEventListeners() {
+            const input = document.getElementById('commentInput');
+            const button = document.getElementById('submitComment');
+
+            button.addEventListener('click', submitComment);
+            input.addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') submitComment();
+            });
+        }
+
+        async function submitComment() {
+            const input = document.getElementById('commentInput');
+            const comment = input.value.trim();
+            
+            if (!comment) return;
+
+            try {
+                await room.collection('comment').create({
+                    message: comment,
+                    processed: false
+                });
+                
+                input.value = '';
+                updateStatus('Comment submitted for processing...');
+            } catch (error) {
+                console.error('Error submitting comment:', error);
+                updateStatus('Error submitting comment');
+            }
+        }
+
+        function updateStatus(message) {
+            document.getElementById('status').textContent = message;
+        }
+
+        async function startImageProcessor() {
+            // Process unprocessed comments every 2 seconds
+            setInterval(async () => {
+                if (isProcessing) return;
+                
+                try {
+                    const unprocessedComments = room.collection('comment')
+                        .filter({ processed: false })
+                        .getList();
+                    
+                    if (unprocessedComments.length > 0) {
+                        const comment = unprocessedComments[0]; // Process oldest first
+                        await processComment(comment);
+                    }
+                } catch (error) {
+                    console.error('Error in image processor:', error);
+                }
+            }, 2000);
+        }
+
+        async function processComment(comment) {
+            if (isProcessing) return;
+            
+            isProcessing = true;
+            updateStatus(`Processing: "${comment.message}"`);
+            document.getElementById('loading').style.display = 'block';
+
+            try {
+                // Generate image with white square prompt
+                const prompt = `White Square in the center ${comment.message} White Square in the center`;
+                
+                const result = await websim.imageGen({
+                    prompt: prompt,
+                    aspect_ratio: "1:1"
+                });
+
+                // Store generated image
+                await room.collection('generated_image').create({
+                    comment_id: comment.id,
+                    comment_message: comment.message,
+                    image_url: result.url,
+                    prompt_used: prompt
+                });
+
+                // Mark comment as processed
+                await room.collection('comment').update(comment.id, {
+                    processed: true
+                });
+
+                updateStatus('Image generated successfully');
+                
+            } catch (error) {
+                console.error('Error processing comment:', error);
+                updateStatus('Error generating image');
+            } finally {
+                isProcessing = false;
+                document.getElementById('loading').style.display = 'none';
+            }
+        }
+
+        async function loadComments() {
+            room.collection('comment').subscribe((comments) => {
+                displayComments(comments.reverse()); // Show newest first
+            });
+        }
+
+        function displayComments(comments) {
+            const container = document.getElementById('commentsList');
+            container.innerHTML = comments.map(comment => `
+                <div class="comment-item ${comment.processed ? 'comment-processed' : ''}">
+                    <div style="font-weight: bold;">${comment.username}</div>
+                    <div>${comment.message}</div>
+                    <div style="opacity: 0.7; font-size: 10px;">
+                        ${new Date(comment.created_at).toLocaleString()}
+                        ${comment.processed ? '✓ Processed' : '⏳ Pending'}
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        async function startRenderer() {
+            // Subscribe to generated images
+            room.collection('generated_image').subscribe(async (images) => {
+                if (images.length > 0) {
+                    currentImages = images.reverse(); // Newest first
+                    await loadImages();
+                }
+            });
+        }
+
+        async function loadImages() {
+            const imageElements = [];
+            
+            for (const imageData of currentImages.slice(0, 10)) { // Load max 10 for performance
+                try {
+                    const img = new Image();
+                    img.crossOrigin = 'anonymous';
+                    
+                    await new Promise((resolve, reject) => {
+                        img.onload = resolve;
+                        img.onerror = reject;
+                        img.src = imageData.image_url;
+                    });
+                    
+                    imageElements.push({
+                        img,
+                        data: imageData
+                    });
+                } catch (error) {
+                    console.error('Error loading image:', error);
+                }
+            }
+            
+            if (imageElements.length > 0) {
+                renderNestedImages(imageElements);
+            }
+        }
+
+        function renderNestedImages(imageElements) {
+            if (animationId) {
+                cancelAnimationFrame(animationId);
+            }
+            
+            let time = 0;
+            const zoomSpeed = 0.002;
+            const transitionDuration = 3000; // 3 seconds per zoom
+            
+            function animate() {
+                time += 16; // ~60fps
+                
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                
+                if (imageElements.length === 0) {
+                    animationId = requestAnimationFrame(animate);
+                    return;
+                }
+                
+                const centerX = canvas.width / 2;
+                const centerY = canvas.height / 2;
+                const baseSize = Math.min(canvas.width, canvas.height) * 0.8;
+                
+                // Calculate current zoom phase
+                const currentIndex = Math.floor(time / transitionDuration) % imageElements.length;
+                const nextIndex = (currentIndex + 1) % imageElements.length;
+                const progress = (time % transitionDuration) / transitionDuration;
+                
+                // Smooth zoom transition
+                const zoomFactor = 1 + (progress * 2); // Zoom from 1x to 3x
+                
+                // Render current image stack
+                for (let i = 0; i <= currentIndex && i < imageElements.length; i++) {
+                    const element = imageElements[i];
+                    const isLatest = i === currentIndex;
+                    
+                    let size = baseSize;
+                    let alpha = 1;
+                    
+                    if (isLatest) {
+                        size *= zoomFactor;
+                        // Calculate nested position (white square in center)
+                        const whiteSquareSize = size * 0.3; // Assume white square is 30% of image
+                        
+                        // Render next image in white square area if available
+                        if (nextIndex < imageElements.length && progress > 0.5) {
+                            const nextElement = imageElements[nextIndex];
+                            const nextSize = whiteSquareSize * (progress - 0.5) * 2;
+                            
+                            ctx.save();
+                            ctx.globalAlpha = (progress - 0.5) * 2;
+                            ctx.drawImage(
+                                nextElement.img,
+                                centerX - nextSize/2,
+                                centerY - nextSize/2,
+                                nextSize,
+                                nextSize
+                            );
+                            ctx.restore();
+                        }
+                    }
+                    
+                    ctx.save();
+                    ctx.globalAlpha = alpha;
+                    ctx.drawImage(
+                        element.img,
+                        centerX - size/2,
+                        centerY - size/2,
+                        size,
+                        size
+                    );
+                    ctx.restore();
+                }
+                
+                // Display current comment
+                if (imageElements[currentIndex]) {
+                    ctx.save();
+                    ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+                    ctx.fillRect(20, canvas.height - 80, canvas.width - 40, 60);
+                    
+                    ctx.fillStyle = '#fff';
+                    ctx.font = '16px Arial';
+                    ctx.textAlign = 'left';
+                    ctx.fillText(
+                        `"${imageElements[currentIndex].data.comment_message}"`,
+                        30,
+                        canvas.height - 50
+                    );
+                    
+                    ctx.font = '12px Arial';
+                    ctx.fillStyle = '#ccc';
+                    ctx.fillText(
+                        `by ${imageElements[currentIndex].data.username}`,
+                        30,
+                        canvas.height - 30
+                    );
+                    ctx.restore();
+                }
+                
+                animationId = requestAnimationFrame(animate);
+            }
+            
+            animate();
+        }
+    </script>
+<script defer src="https://static.cloudflareinsights.com/beacon.min.js/v8c78df7c7c0f484497ecbca7046644da1771523124516" integrity="sha512-8DS7rgIrAmghBFwoOTujcf6D9rXvH8xm8JQ1Ja01h9QX8EzXldiszufYa4IFfKdLUKTTrnSFXLDkUEOTrZQ8Qg==" data-cf-beacon='{"version":"2024.11.0","token":"4c6229722a6346bc8eb5cb0e5eae5d41","server_timing":{"name":{"cfCacheStatus":true,"cfEdge":true,"cfExtPri":true,"cfL4":true,"cfOrigin":true,"cfSpeedBrain":true},"location_startswith":null}}' crossorigin="anonymous"></script>
+</body>
+</html>
+
